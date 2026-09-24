@@ -1,0 +1,19 @@
+# Environment files (contain secrets)
+environments/dev/.env
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+
+# Build artifacts
+src/go/mailagent

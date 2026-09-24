@@ -1,0 +1,27 @@
+FROM golang:1.23-alpine AS builder
+
+WORKDIR /build
+
+ENV GOTOOLCHAIN=auto
+
+# Copy and download dependencies
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source and build
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -o mailagent .
+
+# Runtime stage
+FROM alpine:3.19
+
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+COPY --from=builder /build/mailagent /app/mailagent
+COPY --from=builder /build/config /app/config
+COPY --from=builder /build/rules.md /app/rules.md
+
+EXPOSE 8401
+
+CMD ["/app/mailagent", "-config", "/app/config/config.yaml", "--api", ":8401"]

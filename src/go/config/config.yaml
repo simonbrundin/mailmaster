@@ -1,0 +1,42 @@
+# Mail Agent Configuration
+
+mail:
+  # - name: "Soulmate Sales"
+  #   server: "outlook.office365.com"
+  #   port: 993
+  #   username: "michael.brundin@soulmate.se"
+  #   shared_mailbox: "sales@soulmate.se"
+  #   azure_client_id: "f377dda6-1879-413f-a89a-8a33e2f5f1c6"
+  #   azure_tenant_id: "50e951bf-5241-4248-befe-767d53b02c33"
+  #   oauth_redirect_uri: "http://localhost:8400/callback"
+  #   use_oauth2: true
+  #   folder: "INBOX"
+  #   check_interval: "5m"
+  #   use_tls: true
+
+  - name: "Michael Brundins"
+    server: "imap.one.com"
+    port: 993
+    username: "michael@brundins.se"
+    password_env: "MAIL_PASSWORD_MICHAEL"
+    folder: "INBOX.Simon"
+    check_interval: "5m"
+    use_tls: true
+
+ai:
+  provider: "openai"
+  endpoint: "https://api.openai.com/v1"
+  model: "gpt-5.6-luna"
+  reasoning_effort: "medium"
+  api_key_env: "OPENAI_API_KEY"
+
+rules:
+  file: "rules.md"
+
+logging:
+  level: "info"
+  file: "mail-agent.log"
+
+fallback:
+  enabled: false
+  notify_email: "michael.brundin@soulmate.se"

@@ -1,0 +1,4 @@
+# Ignorera .env filen (innehåller känsliga uppgifter)
+.env
+.env.local
+.env.production

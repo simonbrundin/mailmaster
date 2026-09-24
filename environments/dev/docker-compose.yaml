@@ -1,0 +1,25 @@
+services:
+  nuxt:
+    build:
+      context: /home/simon/repos/mailmaster/src/nuxt
+      dockerfile: /home/simon/repos/mailmaster/environments/dev/Dockerfile
+    ports:
+      - "8400:8400"
+    volumes:
+      - /home/simon/repos/mailmaster/src/nuxt/app:/app/app
+      - /home/simon/repos/mailmaster/src/nuxt/nuxt.config.ts:/app/nuxt.config.ts
+    env_file:
+      - path: /home/simon/repos/mailmaster/environments/dev/.env
+        required: true
+    environment:
+      - NODE_ENV=development
+
+  go-api:
+    build:
+      context: /home/simon/repos/mailmaster/src/go
+      dockerfile: /home/simon/repos/mailmaster/environments/dev/Dockerfile-go
+    ports:
+      - "8401:8401"
+    env_file:
+      - path: /home/simon/repos/mailmaster/environments/dev/.env
+        required: true

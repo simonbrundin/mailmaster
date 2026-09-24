@@ -1,0 +1,4 @@
+# Tiltfile for mailagent development environment
+
+# Docker Compose for all services
+docker_compose(configPaths=['docker-compose.yaml'])
