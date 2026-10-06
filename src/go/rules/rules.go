@@ -21,8 +21,8 @@ type Condition struct {
 
 // Action represents what to do when a rule matches
 type Action struct {
-	Type  string
-	Args  map[string]interface{}
+	Type string
+	Args map[string]interface{}
 }
 
 // Response represents the AI's decision for an email
@@ -215,13 +215,19 @@ func (rs *RuleSet) BuildPromptForAI(email *EmailContext) string {
 
 	sb.WriteString("\n## SVAR\n\n")
 	sb.WriteString("Analysera mailet mot reglerna och bestäm åtgärd(er).\n")
-	sb.WriteString("Svara ENBART i följande format:\n")
+	sb.WriteString("Svara ENBART i följande format (varje del på egen rad, utan extra text):\n")
 	sb.WriteString("ÅTGÄRD: [reply, archive, read, move, forward]\n")
+	sb.WriteString("TILL: [email-ADRESS för forward, MÅSTE vara i formatet name@domain.se]\n")
+	sb.WriteString("SVAR: [svarstext för reply]\n")
 	sb.WriteString("MOTIVERING: [Kortfattad förklaring]\n")
-	sb.WriteString("Om ÅTGÄRD är 'reply', inkludera svarstexten i MOTIVERING, t.ex.:\n")
-	sb.WriteString("  ÅTGÄRD: reply, archive\n")
-	sb.WriteString("  MOTIVERING: Regeln säger svara. Svara: Tack för ditt mail!\n")
-	sb.WriteString("Om ingen regel matchar: ÅTGÄRD: uncertain\n")
+	sb.WriteString("\nKorrekta exempel:\n")
+	sb.WriteString("ÅTGÄRD: reply, archive\n")
+	sb.WriteString("SVAR: Tack för ditt mail!\n")
+	sb.WriteString("MOTIVERING: Regeln säger svara och arkivera.\n")
+	sb.WriteString("\nÅTGÄRD: forward, archive\n")
+	sb.WriteString("TILL: simon.brundin@gmail.com\n")
+	sb.WriteString("MOTIVERING: Vidarebefordra till Simon.\n")
+	sb.WriteString("\nFEL: Om forward anges utan TILL: med giltig email-adress kommer åtgärden INTE utföras!\n")
 
 	return sb.String()
 }

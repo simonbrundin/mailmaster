@@ -95,7 +95,7 @@ func (e *Executor) executeSingleAction(email *rules.EmailContext, response *rule
 	case "forward":
 		to := getActionArg(response, "to")
 		if to == "" {
-			to = e.cfg.NotifyEmail
+			return fmt.Errorf("forward action requires a 'to' address (use TILL: or TO: in response)")
 		}
 		return e.forward(email, to, getActionArg(response, "reply"))
 

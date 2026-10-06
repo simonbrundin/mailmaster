@@ -213,7 +213,7 @@ func (c *Client) ReadEmail(folder string, uid uint32) (*rules.EmailContext, erro
 		imap.FetchEnvelope,
 		imap.FetchBodyStructure,
 		imap.FetchFlags,
-		imap.FetchBody,
+		imap.FetchItem("BODY[TEXT]"),
 	}
 
 	messages := make(chan *imap.Message)
@@ -462,20 +462,19 @@ func (c *Client) messageToEmailContext(msg *imap.Message) *rules.EmailContext {
 
 // extractBodyText extracts the plain text body from an IMAP message
 func extractBodyText(msg *imap.Message) string {
-	// Try to get the text part using BodySectionName with TEXT specifier
-	textSpec := &imap.BodySectionName{
-		BodyPartName: imap.BodyPartName{
-			Specifier: imap.TextSpecifier,
-		},
+	// Try to get the body using GetBody method which handles section parsing
+	// BODY[TEXT] gives us the entire body
+	bodySection := "BODY[TEXT]"
+	sectionName, err := imap.ParseBodySectionName(imap.FetchItem(bodySection))
+	if err == nil {
+		if literal := msg.GetBody(sectionName); literal != nil {
+			buf := make([]byte, literal.Len())
+			literal.Read(buf)
+			return string(buf)
+		}
 	}
 
-	if literal, ok := msg.Body[textSpec]; ok {
-		buf := make([]byte, literal.Len())
-		literal.Read(buf)
-		return string(buf)
-	}
-
-	// Try to find any text body section by iterating
+	// Fallback: try to find any body section with text specifier
 	for spec, literal := range msg.Body {
 		if spec != nil && spec.Specifier == imap.TextSpecifier {
 			buf := make([]byte, literal.Len())
