@@ -18,8 +18,20 @@ services:
     build:
       context: /home/simon/repos/mailmaster/src/go
       dockerfile: /home/simon/repos/mailmaster/environments/dev/Dockerfile-go
+    command: ["/app/mailagent", "-addr=:8401"]
     ports:
       - "8401:8401"
+    env_file:
+      - path: /home/simon/repos/mailmaster/environments/dev/.env
+        required: true
+
+  go-mcp:
+    build:
+      context: /home/simon/repos/mailmaster/src/go
+      dockerfile: /home/simon/repos/mailmaster/environments/dev/Dockerfile-go
+    command: ["/app/mailagent", "-addr=:8402"]
+    ports:
+      - "8402:8402"
     env_file:
       - path: /home/simon/repos/mailmaster/environments/dev/.env
         required: true
