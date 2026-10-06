@@ -32,5 +32,5 @@ Villkor: Mejlet handlar om att förbättra minnet.
 
 Åtgärd:
 
-1. Svara med: "Nu jäklar ska vi boosta minnet!"
+1. Vidarebefordra till simonbrundin@gmail.com med texten: "Nu jäklar ska vi boosta minnet!"
 2. Arkivera mejlet

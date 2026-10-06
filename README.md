@@ -1,20 +1,88 @@
-# mailmaster
+# MailMaster
 
-## Epost-detaljer
+AI-driven e-posthantering. Ansluter till IMAP, skickar mail till en AI-modell tillsammans med regler definierade i markdown, och exekverar AI:ns föreslagna åtgärder.
 
-**Epostadress:** sales@soulmate.se
-**E-postplattform:** Microsoft 365 (Exchange Online)
-**MX-server:** soulmate-se.mail.protection.outlook.com
-**SPF:** v=spf1 include:_spf.google.com include:spf.protection.outlook.com -all
+## Arkitektur
 
-Enklare:
+MailMaster har två huvudkomponenter:
 
-- Microsoft 365 = hela paketet (e-post + Word + Teams + etc.)
-- Exchange Online = enbart e-postdelen i det paketet
+- `src/go/` (Go backend) - IMAP, AI, SMTP, MCP-server, REST API
+- `src/nuxt/` (Nuxt frontend) - SPA för email-hantering
 
-### Protokoll den stödjer (som alla vanliga e-postadresser):
+## Körlägen
 
-- IMAP/POP3 – för att hämta e-post via e-postklienter
-- SMTP – för att skicka e-post
-- Exchange ActiveSync (EAS) – för mobilmail
-- Microsoft Graph API – för API-åtkomst
+Go-backend har tre körlägen:
+
+| Läge | Kommando                        | Beskrivning                 |
+| ---- | ------------------------------- | --------------------------- |
+| CLI  | `./mailagent --once --limit 10` | Processera mail och avsluta |
+| API  | `./mailagent --api :8401`       | REST API för frontend       |
+| MCP  | `./mailagent --mcp`             | MCP-server för AI-agenter   |
+
+## Regler
+
+Regler definieras i markdown och tolkas av AI:n:
+
+```markdown
+# AI Mail Agent - Regler
+
+## Regel: Nyhetsbrev
+
+Villkor: subject contains "nyhetsbrev"
+Åtgärd: read
+
+## Regel: Svara automatiskt
+
+Villkor: subject contains "order"
+Åtgärd: reply
+Svara: Tack för ditt meddelande!
+```
+
+## Konfiguration
+
+Exempelkonfiguration finns i `src/go/config/config.yaml`.
+
+## API Endpoints
+
+| Metod | Path                                              | Beskrivning          |
+| ----- | ------------------------------------------------- | -------------------- |
+| GET   | `/api/v1/accounts`                                | Lista konton         |
+| GET   | `/api/v1/accounts/{name}/folders`                 | Lista mappar         |
+| GET   | `/api/v1/accounts/{name}/folders/{folder}/emails` | Lista mail           |
+| POST  | `/api/v1/accounts/{name}/process`                 | Processa mail med AI |
+| GET   | `/api/v1/rules`                                   | Hämta regler         |
+| PUT   | `/api/v1/rules`                                   | Spara regler         |
+
+## Utveckling
+
+### Projektstruktur
+
+```
+src/go/
+├── main.go           # Entry point
+├── config/           # Konfiguration
+├── imap/             # IMAP-klient
+├── ai/               # AI-provider (OpenAI-kompatibelt)
+│   ├── provider.go   # API-klient
+│   ├── response.go   # Response-parsing
+│   └── auth.go       # OAuth2-autentisering
+├── rules/            # Reglerparser
+│   ├── rules.go      # Markdown-parsing
+│   └── email.go      # Epost-hjälpfunktioner
+├── actions/          # Åtgärdsexekvering
+│   ├── executor.go    # Action executor
+│   └── smtp.go       # SMTP-klient
+├── server/           # REST API
+├── mcp/              # MCP-server
+│   ├── server.go     # Protocol handler
+│   ├── types.go      # MCP types
+│   └── tools.go      # Tool schemas
+└── sasl/             # SASL-mekanismer
+
+src/nuxt/
+├── nuxt.config.ts    # Nuxt-konfiguration
+└── app/
+    ├── pages/        # Sidor
+    ├── components/   # Komponenter
+    └── composables/  # Vue composables
+```
