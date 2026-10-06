@@ -130,6 +130,29 @@ func parseMotivationForAction(motivation string) *Response {
 		}
 	}
 
+	// Check for forward - MUST have email address
+	if strings.Contains(lower, "vidarebefordr") || strings.Contains(lower, "forward") {
+		// Try to extract email address from motivation
+		emailRegex := regexp.MustCompile(`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)
+		matches := emailRegex.FindAllString(motivation, -1)
+		
+		if len(matches) == 0 {
+			// No email found - return uncertain so user knows action couldn't be completed
+			return &Response{
+				Action:     "uncertain",
+				Motivation: motivation + "\n[FEL: Forward kräver en email-adress med TILL: exempel@domän.se]",
+				Confidence: 0.3,
+			}
+		}
+		
+		return &Response{
+			Action:     "forward",
+			Motivation: motivation,
+			Confidence: 0.85,
+			ActionArgs: map[string]interface{}{"to": matches[0]},
+		}
+	}
+
 	// Check for archive
 	if strings.Contains(lower, "arkiv") || strings.Contains(lower, "archiv") {
 		return &Response{
