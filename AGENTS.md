@@ -19,4 +19,5 @@ wikictl ingest                          # flytta inboxen in i grafen
 ```
 
 Anteckningar taggas automatiskt med `projekt:<repo>`.
+Schemat för wikin står i `~/wiki/AGENTS.md`.
 <!-- wiki:end -->
