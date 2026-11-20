@@ -5,6 +5,8 @@ import (
 	"os"
 	"time"
 
+	"mailagent/oauth"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -119,6 +121,18 @@ func (m *MailAccount) GetPassword() (string, error) {
 		return "", fmt.Errorf("environment variable %s not set", m.PasswordEnv)
 	}
 	return val, nil
+}
+
+// OAuthConfig builds the OAuth2 configuration for this account. Accounts that
+// do not use OAuth2 return a config that fails validation.
+func (m *MailAccount) OAuthConfig() oauth.Config {
+	return oauth.Config{
+		ClientID:    m.AzureClientID,
+		TenantID:    m.AzureTenantID,
+		Username:    m.Username,
+		RedirectURI: m.OAuthRedirectURI,
+		CachePath:   m.OAuthCachePath,
+	}
 }
 
 // GetSMTPServer returns the configured SMTP server, with provider defaults.
