@@ -32,5 +32,15 @@ Villkor: Mejlet handlar om att förbättra minnet.
 
 Åtgärd:
 
-1. Vidarebefordra till simonbrundin@gmail.com med texten: "Nu jäklar ska vi boosta minnet!"
+1. Vidarebefordra till simonbrundin@gmail.com med:
+   {"titel": "Nu jäklar ska vi boosta minnet!"}
+
 2. Arkivera mejlet
+
+### Regeln: Sundsvall eller Remote
+
+Villkor: Kolla ifall konsultuppdraget som mejlet avser ska utföras Sundsvall eller kan göra remote till 100%. Ifall det inte gör det utan ska utföras fysiskt på någon annan ort eller inte kan göras 100% remote så kör åtgärderna nedan.
+
+Åtgärd:
+
+1. Arkivera mejlet

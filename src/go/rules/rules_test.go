@@ -117,19 +117,19 @@ Villkor: subject contains "test"
 	}
 
 	prompt := rs.BuildPromptForAI(email)
-	
+
 	if !strings.Contains(prompt, "Test mail") {
 		t.Error("Prompt should contain email subject")
 	}
-	
+
 	if !strings.Contains(prompt, "test@example.com") {
 		t.Error("Prompt should contain email from")
 	}
-	
+
 	if !strings.Contains(prompt, "Bilagor: Ja") {
 		t.Error("Prompt should indicate attachments")
 	}
-	
+
 	if !strings.Contains(prompt, "ÅTGÄRD:") {
 		t.Error("Prompt should contain action request")
 	}
@@ -143,13 +143,13 @@ Test prompt.
 Villkor: subject contains "spam"
 Åtgärd: archive
 `
-	
+
 	tmpfile, err := os.CreateTemp("", "rules*.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.Remove(tmpfile.Name())
-	
+
 	if _, err := tmpfile.Write([]byte(content)); err != nil {
 		t.Fatal(err)
 	}
@@ -188,5 +188,60 @@ func TestExtractEmailAddress(t *testing.T) {
 		if result != tt.expected {
 			t.Errorf("ExtractEmailAddress(%q) = %q, want %q", tt.input, result, tt.expected)
 		}
+	}
+}
+
+func TestFindRuleByName(t *testing.T) {
+	rs, err := ParseMarkdown(`## Regler
+
+### Regeln: Ämne innehåller viktigt
+
+Villkor: Ämne eller titel innehåller ordet "viktigt"
+
+Åtgärd: Arkivera mejlet
+`)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	rule := rs.FindRule("ämne innehåller viktigt")
+	if rule == nil {
+		t.Fatal("Expected to find rule by lowercase name")
+	}
+	if rule.Name != "Ämne innehåller viktigt" {
+		t.Errorf("Expected rule %q, got %q", "Ämne innehåller viktigt", rule.Name)
+	}
+	if rule.Condition.Raw != `Ämne eller titel innehåller ordet "viktigt"` {
+		t.Errorf("Unexpected condition: %q", rule.Condition.Raw)
+	}
+
+	if rs.FindRule("ingen sådan regel") != nil {
+		t.Error("Expected no rule for unknown name")
+	}
+}
+
+func TestFindRuleInText(t *testing.T) {
+	rs, err := ParseMarkdown(`## Regler
+
+### Regeln: Minnesmejl
+
+Villkor: Mejlet handlar om att förbättra minnet.
+
+Åtgärd: Arkivera mejlet
+`)
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	rule := rs.FindRuleInText("Detta mejlet enligt Minnesmejl ska arkiveras.")
+	if rule == nil {
+		t.Fatal("Expected to find rule mentioned in text")
+	}
+	if rule.Name != "Minnesmejl" {
+		t.Errorf("Expected rule %q, got %q", "Minnesmejl", rule.Name)
+	}
+
+	if rs.FindRuleInText("helt orelaterad text") != nil {
+		t.Error("Expected no rule for unrelated text")
 	}
 }

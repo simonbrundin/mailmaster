@@ -2,9 +2,17 @@ package rules
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// orderedListItem matches action lines written as "1. Svara med: ...".
+var orderedListItem = regexp.MustCompile(`^\d+[.)]\s+(.*)$`)
+
+// ruleHeading matches rule headings, e.g. "## Regel: Nyhetsbrev" or
+// "### Regeln: Ämne innehåller viktigt".
+var ruleHeading = regexp.MustCompile(`^#{2,4}\s+(?:Regel|Regeln|Rule):\s*(.*)$`)
 
 // Rule represents a mail processing rule
 type Rule struct {
@@ -50,6 +58,7 @@ func ParseMarkdown(content string) (*RuleSet, error) {
 	lines := strings.Split(content, "\n")
 	currentSection := ""
 	currentRule := (*Rule)(nil)
+	rulesSection := false
 	var rulesText strings.Builder
 
 	for _, line := range lines {
@@ -59,15 +68,16 @@ func ParseMarkdown(content string) (*RuleSet, error) {
 			continue
 		}
 
-		// System instruction section
-		if currentSection == "# ai mail agent - regler" || currentSection == "# mailmaster - regler" || currentSection == "# system instruction" {
-			if !strings.HasPrefix(line, "##") && line != "" && !strings.HasPrefix(line, "#") {
+		// System instruction section: the intro before the rules section.
+		if !rulesSection && currentSection != "# regler" && currentSection != "# rules" && strings.HasPrefix(currentSection, "# ") {
+			if !strings.HasPrefix(line, "#") && line != "" {
 				rs.SystemPrompt += line + "\n"
 			}
 		}
 
 		// Collect rules text for AI (everything after ## Regler section)
 		if strings.Contains(strings.ToLower(line), "## regler") || strings.Contains(strings.ToLower(line), "## rules") {
+			rulesSection = true
 			rulesText.WriteString(line + "\n")
 			continue
 		}
@@ -76,14 +86,12 @@ func ParseMarkdown(content string) (*RuleSet, error) {
 		}
 
 		// New rule (## Regel: or ## Rule:)
-		if strings.HasPrefix(line, "## Regel:") || strings.HasPrefix(line, "## Rule:") {
+		if m := ruleHeading.FindStringSubmatch(line); m != nil {
 			if currentRule != nil {
 				rs.Rules = append(rs.Rules, *currentRule)
 			}
-			name := strings.TrimSpace(strings.TrimPrefix(line, "## Regel:"))
-			name = strings.TrimSpace(strings.TrimPrefix(name, "## Rule:"))
 			currentRule = &Rule{
-				Name:      name,
+				Name:      strings.TrimSpace(m[1]),
 				Priority:  len(rs.Rules),
 				Condition: Condition{},
 				Actions:   make([]Action, 0),
@@ -112,6 +120,11 @@ func ParseMarkdown(content string) (*RuleSet, error) {
 			if strings.HasPrefix(line, "- ") {
 				parseAction(currentRule, strings.TrimSpace(strings.TrimPrefix(line, "- ")))
 			}
+
+			// Numbered action lines, e.g. "1. Svara med: "..."
+			if m := orderedListItem.FindStringSubmatch(line); m != nil {
+				parseAction(currentRule, strings.TrimSpace(m[1]))
+			}
 		}
 	}
 
@@ -131,18 +144,14 @@ func parseAction(rule *Rule, action string) {
 		return
 	}
 
-	// reply with "Svara med texten: X" or "Reply: X"
-	if strings.Contains(action, "Svara med texten:") {
-		msg := strings.TrimSpace(strings.TrimPrefix(action, "Svara med texten:"))
-		rule.Actions = append(rule.Actions, Action{Type: "reply", Args: map[string]interface{}{"message": msg}})
-		return
-	}
-
-	// Also check for "Svara:" prefix
-	if strings.HasPrefix(action, "Svara:") {
-		msg := strings.TrimSpace(strings.TrimPrefix(action, "Svara:"))
-		rule.Actions = append(rule.Actions, Action{Type: "reply", Args: map[string]interface{}{"message": msg}})
-		return
+	// reply with "Svara med texten: X", "Svara med: X" or "Svara: X"
+	for _, prefix := range []string{"Svara med texten:", "Svara med:", "Svara:", "Reply:", "reply with:"} {
+		if strings.Contains(action, prefix) {
+			msg := strings.TrimSpace(strings.TrimPrefix(action, prefix))
+			msg = stripQuotes(msg)
+			rule.Actions = append(rule.Actions, Action{Type: "reply", Args: map[string]interface{}{"message": msg}})
+			return
+		}
 	}
 
 	// reply (plain)
@@ -174,6 +183,44 @@ func parseAction(rule *Rule, action string) {
 		rule.Actions = append(rule.Actions, Action{Type: "move"})
 		return
 	}
+}
+
+// FindRule looks up a rule by name. The match is case-insensitive and falls
+// back on a partial match, so the AI can answer with a shortened rule name.
+func (rs *RuleSet) FindRule(name string) *Rule {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	lower := strings.ToLower(name)
+	for i := range rs.Rules {
+		if strings.ToLower(rs.Rules[i].Name) == lower {
+			return &rs.Rules[i]
+		}
+	}
+	for i := range rs.Rules {
+		ruleName := strings.ToLower(rs.Rules[i].Name)
+		if ruleName != "" && (strings.Contains(ruleName, lower) || strings.Contains(lower, ruleName)) {
+			return &rs.Rules[i]
+		}
+	}
+	return nil
+}
+
+// FindRuleInText looks for a rule name inside a free text, e.g. the AI's
+// motivation. It returns the first rule whose name is mentioned in the text.
+func (rs *RuleSet) FindRuleInText(text string) *Rule {
+	lower := strings.ToLower(text)
+	if strings.TrimSpace(lower) == "" {
+		return nil
+	}
+	for i := range rs.Rules {
+		name := strings.ToLower(rs.Rules[i].Name)
+		if name != "" && strings.Contains(lower, name) {
+			return &rs.Rules[i]
+		}
+	}
+	return nil
 }
 
 // BuildPromptForAI builds the full prompt to send to the AI
@@ -220,10 +267,12 @@ func (rs *RuleSet) BuildPromptForAI(email *EmailContext) string {
 	sb.WriteString("TILL: [email-ADRESS för forward, MÅSTE vara i formatet name@domain.se]\n")
 	sb.WriteString("SVAR: [svarstext för reply]\n")
 	sb.WriteString("MOTIVERING: [Kortfattad förklaring]\n")
+	sb.WriteString("REGEL: [namnet på regeln som matchade, eller \"ingen\" om ingen regel matchade]\n")
 	sb.WriteString("\nKorrekta exempel:\n")
 	sb.WriteString("ÅTGÄRD: reply, archive\n")
 	sb.WriteString("SVAR: Tack för ditt mail!\n")
 	sb.WriteString("MOTIVERING: Regeln säger svara och arkivera.\n")
+	sb.WriteString("REGEL: Nyhetsbrev\n")
 	sb.WriteString("\nÅTGÄRD: forward, archive\n")
 	sb.WriteString("TILL: simon.brundin@gmail.com\n")
 	sb.WriteString("MOTIVERING: Vidarebefordra till Simon.\n")
@@ -244,6 +293,15 @@ func formatAction(a Action) string {
 		return "Läs mailet"
 	}
 	return a.Type
+}
+
+// stripQuotes removes a single pair of surrounding double quotes.
+func stripQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && strings.HasPrefix(s, "\"") && strings.HasSuffix(s, "\"") {
+		return strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
 }
 
 // EmailContext holds the email data to process
