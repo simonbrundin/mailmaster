@@ -7,10 +7,13 @@ services:
       - "8400:8400"
     volumes:
       - /home/simon/repos/mailmaster/src/nuxt/app:/app/app
+      - /home/simon/repos/mailmaster/src/nuxt/server:/app/server
       - /home/simon/repos/mailmaster/src/nuxt/nuxt.config.ts:/app/nuxt.config.ts
     env_file:
       - path: /home/simon/repos/mailmaster/environments/dev/.env
         required: true
+      - path: /home/simon/repos/mailmaster/environments/dev/kameo.env
+        required: false
     environment:
       - NODE_ENV=development
 

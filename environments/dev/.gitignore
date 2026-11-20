@@ -2,3 +2,7 @@
 .env
 .env.local
 .env.production
+
+# Synkade Kameo-uppgifter från 1Password (bun run kameo:sync)
+# kameo.env.enc är SOPS-krypterat och kan checkas in, kameo.env är klartext.
+kameo.env

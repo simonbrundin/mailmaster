@@ -11,6 +11,9 @@
     "dev": "nuxt dev",
     "generate": "nuxt generate",
     "preview": "nuxt preview",
+    "test": "bun test",
+    "kameo:sync": "bun run scripts/kameo-sync.ts",
+    "kameo:decrypt": "bun run scripts/kameo-decrypt.ts",
     "postinstall": "nuxt prepare"
   },
   "type": "module"
