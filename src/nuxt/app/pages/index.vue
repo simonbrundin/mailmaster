@@ -1,30 +1,36 @@
 <script setup lang="ts">
 import { useEmailProcessing } from '~/composables/useEmailProcessing'
 
-const config = useAppConfig()
-
 const {
-  emails, loading, processing, error, processResults,
-  showResults, folder, folders, fetchEmails,
-  processEmails, closeResults
+  emails, loading, analyzing, error,
+  analyses, decisions, decidingUid,
+  fetchEmails, analyzeEmails, decideEmail
 } = useEmailProcessing()
+
+const { current, folders, folder, needsLogin, selectFolder } = useAccounts()
 </script>
 
 <template>
   <div class="container">
     <header>
       <h1><span class="emoji">📬</span> MailMaster</h1>
-      <p class="subtitle">Account: {{ config.account }}</p>
+      <p class="subtitle">Account: {{ current?.name ?? '—' }}</p>
+      <nav class="nav-links">
+        <NuxtLink to="/kameo-utbetalningar">💸 Kameo utbetalningar</NuxtLink>
+      </nav>
     </header>
+
+    <AccountSelector />
 
     <EmailControls
       :folder="folder"
       :folders="folders"
       :loading="loading"
-      :processing="processing"
-      @update:folder="folder = $event as any"
+      :analyzing="analyzing"
+      :disabled="needsLogin"
+      @update:folder="selectFolder"
       @fetch="fetchEmails"
-      @process="processEmails"
+      @analyze="analyzeEmails"
     />
 
     <div v-if="error" class="error">
@@ -35,18 +41,16 @@ const {
       v-if="emails.length > 0"
       :emails="emails"
       :folder="folder"
+      :analyses="analyses"
+      :decisions="decisions"
+      :deciding-uid="decidingUid"
+      @decide="decideEmail"
     />
 
     <div v-else-if="!loading && !error" class="empty">
       <p>No emails loaded yet</p>
       <p class="hint">Click the button above to fetch emails</p>
     </div>
-
-    <ResultsModal
-      :show="showResults"
-      :results="processResults"
-      @close="closeResults"
-    />
   </div>
 </template>
 
@@ -65,7 +69,7 @@ body {
 }
 
 .container {
-  max-width: 800px;
+  max-width: 1000px;
   margin: 0 auto;
   padding: 2rem;
 }
@@ -95,6 +99,20 @@ h1 {
 .subtitle {
   color: #888;
   font-size: 0.9rem;
+}
+
+.nav-links {
+  margin-top: 0.75rem;
+}
+
+.nav-links a {
+  color: #b9a7ff;
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+
+.nav-links a:hover {
+  text-decoration: underline;
 }
 
 .error {

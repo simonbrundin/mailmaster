@@ -3,16 +3,15 @@ defineProps<{
   folder: string
   folders: readonly string[]
   loading: boolean
-  processing: boolean
+  analyzing: boolean
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'update:folder', value: string): void
   (e: 'fetch'): void
-  (e: 'process'): void
+  (e: 'analyze'): void
 }>()
-
-const router = useRouter()
 </script>
 
 <template>
@@ -20,6 +19,7 @@ const router = useRouter()
     <select
       :value="folder"
       class="folder-select"
+      :disabled="disabled || folders.length === 0"
       @change="emit('update:folder', ($event.target as HTMLSelectElement).value)"
     >
       <option v-for="f in folders" :key="f" :value="f">{{ f }}</option>
@@ -27,18 +27,18 @@ const router = useRouter()
 
     <button
       @click="emit('fetch')"
-      :disabled="loading"
+      :disabled="loading || disabled"
       class="btn btn-primary"
     >
       {{ loading ? '⏳ Loading...' : '📥 Hämta mejl' }}
     </button>
 
     <button
-      @click="emit('process')"
-      :disabled="processing"
+      @click="emit('analyze')"
+      :disabled="analyzing || disabled"
       class="btn btn-orange"
     >
-      {{ processing ? '🤖 Processar...' : '🤖 Processa mejl' }}
+      {{ analyzing ? '🤖 Analyserar...' : '🤖 Processa mejl' }}
     </button>
 
     <NuxtLink to="/rules" class="btn btn-secondary">

@@ -7,38 +7,58 @@ export interface Email {
   folder: string
 }
 
-export interface ProcessResult {
+export interface SuggestedAction {
+  type: string
+  description: string
+}
+
+export interface Analysis {
   uid: number
   subject: string
-  action: string
-  confidence: string
+  from: string
+  folder: string
+  matched: boolean
+  rule: string
+  condition: string
+  description: string
   motivation: string
-  success: boolean
+  confidence: string
+  actions: SuggestedAction[]
   error?: string
 }
 
-const FOLDERS = ['INBOX.Simon', 'INBOX', 'INBOX.Sent', 'INBOX.Drafts', 'INBOX.Trash'] as const
-type Folder = typeof FOLDERS[number]
+export type DecisionState = 'pending' | 'approved' | 'denied' | 'error'
+
+export interface Decision {
+  state: DecisionState
+  message?: string
+}
 
 export function useEmailProcessing() {
   const config = useAppConfig()
+  const { currentAccount, folder } = useAccounts()
 
   const emails = ref<Email[]>([])
   const loading = ref(false)
-  const processing = ref(false)
+  const analyzing = ref(false)
   const error = ref<string | null>(null)
-  const processResults = ref<ProcessResult[]>([])
-  const showResults = ref(false)
-  const folder = ref<Folder>('INBOX.Simon')
+  const analyses = ref<Record<number, Analysis>>({})
+  const decisions = ref<Record<number, Decision>>({})
+  const decidingUid = ref<number | null>(null)
+
+  // accountPath is the account name used in the API calls. It follows the
+  // account selected in the UI.
+  function accountPath(): string {
+    return currentAccount.value || config.account
+  }
 
   async function fetchEmails() {
     loading.value = true
     error.value = null
-    showResults.value = false
 
     try {
       const res = await $fetch<{ emails: Email[] }>(
-        `${config.apiBase}/accounts/${config.account}/folders/${folder.value}/emails`,
+        `${config.apiBase}/accounts/${encodeURIComponent(accountPath())}/folders/${encodeURIComponent(folder.value)}/emails`,
         { query: { limit: 50 } }
       )
       emails.value = res.emails
@@ -49,31 +69,73 @@ export function useEmailProcessing() {
     }
   }
 
-  async function processEmails() {
-    processing.value = true
+  // analyzeEmails asks the AI to analyse the emails without executing any
+  // action. The result is shown next to each email so the user can approve
+  // or deny the proposed actions.
+  async function analyzeEmails() {
+    analyzing.value = true
     error.value = null
-    processResults.value = []
-    showResults.value = false
+    analyses.value = {}
+    decisions.value = {}
 
     try {
-      const res = await $fetch<{ results: ProcessResult[] }>(
-        `${config.apiBase}/accounts/${config.account}/process`,
+      const res = await $fetch<{ results?: Analysis[] }>(
+        `${config.apiBase}/accounts/${encodeURIComponent(accountPath())}/analyze`,
         {
           method: 'POST',
-          body: { folder: folder.value, limit: 50 }
+          body: { folder: folder.value, limit: 10 }
         }
       )
-      processResults.value = res.results
-      showResults.value = true
+      const map: Record<number, Analysis> = {}
+      for (const analysis of res.results ?? []) {
+        map[analysis.uid] = analysis
+      }
+      analyses.value = map
     } catch (e: any) {
-      error.value = e.message || 'Failed to process emails'
+      error.value = e.message || 'Failed to analyze emails'
     } finally {
-      processing.value = false
+      analyzing.value = false
     }
   }
 
-  function closeResults() {
-    showResults.value = false
+  // decideEmail approves or denies the proposed actions for one email.
+  async function decideEmail(uid: number, decision: 'approve' | 'deny') {
+    decidingUid.value = uid
+    error.value = null
+
+    try {
+      const res = await $fetch<{ success: boolean; message?: string }>(
+        `${config.apiBase}/accounts/${encodeURIComponent(accountPath())}/decision`,
+        {
+          method: 'POST',
+          body: { folder: folder.value, uid, decision }
+        }
+      )
+      decisions.value = {
+        ...decisions.value,
+        [uid]: {
+          state: res.success ? (decision === 'approve' ? 'approved' : 'denied') : 'error',
+          message: res.message
+        }
+      }
+
+      // The mail may have been archived or moved - refresh the list.
+      if (res.success && decision === 'approve') {
+        await fetchEmails()
+      }
+    } catch (e: any) {
+      error.value = e.message || 'Failed to save the decision'
+      decisions.value = {
+        ...decisions.value,
+        [uid]: { state: 'error', message: e.message || 'Failed to save the decision' }
+      }
+    } finally {
+      decidingUid.value = null
+    }
+  }
+
+  function analysisFor(uid: number): Analysis | undefined {
+    return analyses.value[uid]
   }
 
   function formatDate(dateStr: string): string {
@@ -89,15 +151,16 @@ export function useEmailProcessing() {
   return {
     emails,
     loading,
-    processing,
+    analyzing,
     error,
-    processResults,
-    showResults,
+    analyses,
+    decisions,
+    decidingUid,
     folder,
-    folders: FOLDERS,
     fetchEmails,
-    processEmails,
-    closeResults,
+    analyzeEmails,
+    decideEmail,
+    analysisFor,
     formatDate
   }
 }
