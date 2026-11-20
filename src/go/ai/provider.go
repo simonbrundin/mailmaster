@@ -23,6 +23,7 @@ type Response struct {
 	Motivation string                 `json:"motivation"`   // Why this action was chosen
 	ActionArgs map[string]interface{} `json:"action_args"`  // Additional args for the action
 	Confidence float64                `json:"confidence"`   // 0.0 - 1.0
+	Rule       string                 `json:"rule"`        // Name of the matched rule ("" if none)
 }
 
 // OpenAIProvider implements Provider using OpenAI-compatible API

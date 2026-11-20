@@ -42,13 +42,51 @@ func normalizeAction(action string) string {
 	}
 }
 
+// parseActions splits an action field such as "reply, archive" into a list of
+// canonical actions. The order in the field is preserved.
+func parseActions(action string) []string {
+	parts := strings.FieldsFunc(action, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n'
+	})
+
+	actions := make([]string, 0, len(parts))
+	for _, part := range parts {
+		normalized := normalizeAction(part)
+		if normalized == "" {
+			continue
+		}
+		actions = append(actions, normalized)
+	}
+	return actions
+}
+
+// stripQuotes removes a single pair of surrounding double quotes.
+func stripQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && strings.HasPrefix(s, "\"") && strings.HasSuffix(s, "\"") {
+		return strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
+}
+
+// ParseResponse parses raw AI output into a Response. Exported so that tests
+// and tooling use the same parsing as the provider.
+func ParseResponse(content string) *Response {
+	return parseResponse(content)
+}
+
 // parseResponse parses AI response text into a Response struct.
 // First tries structured format (ÅTGÄRD:/MOTIVERING:), then falls back to free-text.
 func parseResponse(content string) *Response {
 	if structured := parseStructuredFormat(content); structured != nil {
+		if structured.Rule == "" {
+			structured.Rule = ParseRule(content)
+		}
 		return structured
 	}
-	return parseFreeTextFallback(content)
+	resp := parseFreeTextFallback(content)
+	resp.Rule = ParseRule(content)
+	return resp
 }
 
 // parseStructuredFormat parses key:value format like "ÅTGÄRD: read".
@@ -67,11 +105,24 @@ func parseStructuredFormat(content string) *Response {
 
 		// Action line
 		if strings.HasPrefix(line, "ÅTGÄRD:") || strings.HasPrefix(line, "ACTION:") {
-			action := strings.TrimSpace(strings.TrimPrefix(line, "ÅTGÄRD:"))
-			action = strings.TrimSpace(strings.TrimPrefix(action, "ACTION:"))
-			resp.Action = normalizeAction(action)
-			resp.Confidence = confidenceForAction(resp.Action)
-			changed = true
+			raw := strings.TrimSpace(strings.TrimPrefix(line, "ÅTGÄRD:"))
+			raw = strings.TrimSpace(strings.TrimPrefix(raw, "ACTION:"))
+			actions := parseActions(raw)
+			if len(actions) > 0 {
+				resp.Action = actions[0]
+				if len(actions) > 1 {
+					resp.ActionArgs["actions"] = actions
+				}
+				resp.Confidence = confidenceForAction(resp.Action)
+				changed = true
+			}
+		}
+
+		// Rule line - the name of the rule the mail matched
+		if strings.HasPrefix(line, "REGEL:") || strings.HasPrefix(line, "RULE:") {
+			raw := strings.TrimSpace(strings.TrimPrefix(line, "REGEL:"))
+			raw = strings.TrimSpace(strings.TrimPrefix(raw, "RULE:"))
+			resp.Rule = strings.Trim(raw, "\"")
 		}
 
 		// Motivation line
@@ -90,14 +141,26 @@ func parseStructuredFormat(content string) *Response {
 			{"REPLY:", "reply"},
 		} {
 			if strings.HasPrefix(line, prefix.key) {
-				resp.ActionArgs[prefix.name] = strings.TrimSpace(strings.TrimPrefix(line, prefix.key))
+				value := strings.TrimSpace(strings.TrimPrefix(line, prefix.key))
+				if prefix.name == "reply" {
+					value = stripQuotes(value)
+				}
+				resp.ActionArgs[prefix.name] = value
 			}
 		}
 	}
 
-	// If action is uncertain, check if the motivation contains actionable content
+	// If the action field was not understood, fall back on what the structured
+	// fields or the motivation tell us — but never throw away a reply text or
+	// a recipient that the AI already gave us.
 	if resp.Action == "uncertain" {
-		if parsed := parseMotivationForAction(resp.Motivation); parsed != nil {
+		if reply, _ := resp.ActionArgs["reply"].(string); strings.TrimSpace(reply) != "" {
+			resp.Action = "reply"
+			resp.Confidence = 0.85
+		} else if to, _ := resp.ActionArgs["to"].(string); strings.TrimSpace(to) != "" {
+			resp.Action = "forward"
+			resp.Confidence = 0.85
+		} else if parsed := parseMotivationForAction(resp.Motivation); parsed != nil {
 			return parsed
 		}
 	}
@@ -240,16 +303,33 @@ func parseFreeTextFallback(content string) *Response {
 	return resp
 }
 
+// ParseRule extracts the rule name from a raw AI answer. Used as a fallback
+// when the structured REGEL: field is missing.
+func ParseRule(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(strings.Trim(line, "*"))
+		if strings.HasPrefix(line, "REGEL:") || strings.HasPrefix(line, "RULE:") {
+			raw := strings.TrimSpace(strings.TrimPrefix(line, "REGEL:"))
+			raw = strings.TrimSpace(strings.TrimPrefix(raw, "RULE:"))
+			return strings.Trim(raw, "\"")
+		}
+	}
+	return ""
+}
+
 // extractReplyFromContent extracts the reply text from content that may contain "Svara:" or similar.
+// An explicit "Svara:"/"Reply:" line wins and is returned verbatim (only quotes
+// and trailing whitespace are removed). Otherwise a quoted sentence is used.
 func extractReplyFromContent(content string) string {
 	// Look for patterns like "Svara: text" or "Reply: text"
-	patterns := []string{"svara:", "reply:", "svara :", "reply :"}
+	patterns := []string{"svara:", "reply:", "svar:", "svara :", "reply :", "svar :"}
 	for _, pattern := range patterns {
 		if idx := strings.Index(strings.ToLower(content), pattern); idx >= 0 {
 			// Get text after the pattern
 			replyText := strings.TrimSpace(content[idx+len(pattern):])
-			// Clean up common suffixes
-			replyText = strings.Split(replyText, "")[0] // Stop at first newline
+			// Stop at first newline
+			replyText = strings.Split(replyText, "\n")[0]
+			replyText = strings.TrimSpace(replyText)
 			// If it starts with a quote, find the end quote
 			if strings.HasPrefix(replyText, "\"") {
 				replyText = strings.TrimPrefix(replyText, "\"")
@@ -257,18 +337,17 @@ func extractReplyFromContent(content string) string {
 					replyText = replyText[:idx]
 				}
 			}
-			// Otherwise take text until common separators
-			for _, sep := range []string{" och ", " .", "!", "?"} {
-				if idx := strings.Index(replyText, sep); idx > 5 {
-					replyText = replyText[:idx]
-					break
-				}
-			}
 			replyText = strings.TrimSpace(replyText)
 			if len(replyText) > 0 && len(replyText) < 500 {
 				return replyText
 			}
 		}
+	}
+
+	// No explicit label - fall back on a quoted sentence, but only if it looks
+	// like a sentence and not a single keyword quoted in the motivation.
+	if quoted := extractQuotedText(content); len(strings.Fields(quoted)) >= 2 {
+		return quoted
 	}
 	return ""
 }
