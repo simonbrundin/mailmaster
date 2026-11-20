@@ -70,12 +70,17 @@ func (c *Client) authenticateXOAuth2(accessToken string) error {
 	return c.conn.Authenticate(sasl.NewClient(authUser, accessToken))
 }
 
-// Close closes the IMAP connection
+// Close closes the IMAP connection. It is safe to call on a client that never
+// connected.
+//
+// Note that go-imap's Close() only closes the selected mailbox, so the TCP
+// connection is terminated with Terminate().
 func (c *Client) Close() error {
-	if c.conn != nil {
-		return c.conn.Close()
+	if c.conn == nil {
+		return nil
 	}
-	return nil
+	_ = c.conn.Close()
+	return c.conn.Terminate()
 }
 
 // ListFolders returns all available folders

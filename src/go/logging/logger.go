@@ -12,8 +12,8 @@ import (
 // Logger wraps structured logging
 type Logger struct {
 	*slog.Logger
-	file  *os.File
-	mu    sync.Mutex
+	file *os.File
+	mu   sync.Mutex
 }
 
 // New creates a new logger

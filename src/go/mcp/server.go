@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"mailagent/actions"
@@ -18,13 +19,29 @@ import (
 
 // Server wraps the MCP server with mail agent dependencies
 type Server struct {
-	cfg         *config.Config
-	aiProvider  *ai.OpenAIProvider
-	ruleSet     *rules.RuleSet
-	executor    *actions.Executor
-	imapClient  *imap.Client
-	account     *config.MailAccount
-	httpServer  *http.Server
+	cfg        *config.Config
+	aiProvider *ai.OpenAIProvider
+	ruleSet    *rules.RuleSet
+	executor   *actions.Executor
+	imapClient *imap.Client
+	account    *config.MailAccount
+	httpServer *http.Server
+
+	// sessions keeps one IMAP session per account, so that switching accounts
+	// in the UI does not require a new login every time.
+	sessions *sessionStore
+
+	// connMu serialises switching the active account and connection.
+	connMu sync.Mutex
+
+	// logins holds the pending device code logins per account.
+	loginsMu sync.Mutex
+	logins   map[string]*pendingLogin
+
+	// analyses holds the AI proposals for the emails the user has analysed,
+	// so that an approval can be executed with the exact proposed arguments.
+	analysesMu sync.Mutex
+	analyses   map[string]map[uint32]analysisItem
 }
 
 // NewServer creates a new MCP server
@@ -33,7 +50,30 @@ func NewServer(cfg *config.Config, aiProv *ai.OpenAIProvider, ruleSet *rules.Rul
 		cfg:        cfg,
 		aiProvider: aiProv,
 		ruleSet:    ruleSet,
+		sessions:   newSessionStore(),
+		logins:     make(map[string]*pendingLogin),
+		analyses:   make(map[string]map[uint32]analysisItem),
 	}
+}
+
+// analysisKey identifies the analyses for one account and folder.
+func analysisKey(account, folder string) string {
+	return account + "|" + folder
+}
+
+// storeAnalyses saves the analyses for an account and folder.
+func (s *Server) storeAnalyses(account, folder string, items map[uint32]analysisItem) {
+	s.analysesMu.Lock()
+	defer s.analysesMu.Unlock()
+	s.analyses[analysisKey(account, folder)] = items
+}
+
+// analysisFor returns a previously stored analysis.
+func (s *Server) analysisFor(account, folder string, uid uint32) (analysisItem, bool) {
+	s.analysesMu.Lock()
+	defer s.analysesMu.Unlock()
+	item, ok := s.analyses[analysisKey(account, folder)][uid]
+	return item, ok
 }
 
 // Start begins the MCP server on stdio
@@ -89,34 +129,81 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // --- Connection Management ---
 
-func (s *Server) ensureConnection() error {
-	if s.imapClient != nil {
-		return nil
-	}
+// ensureConnection connects to the default account.
+func (s *Server) ensureConnection() (*accountSession, error) {
+	return s.ensureConnectionFor("")
+}
 
-	if len(s.cfg.Mail) == 0 {
-		return fmt.Errorf("no mail accounts configured")
-	}
+// ensureConnectionFor makes sure an IMAP connection exists for the given
+// account name. An empty name means the first configured account. The
+// connection is cached per account, so switching back and forth is cheap.
+func (s *Server) ensureConnectionFor(accountName string) (*accountSession, error) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
 
-	s.account = &s.cfg.Mail[0]
-
-	password, err := s.account.GetPassword()
+	account, err := s.accountByName(accountName)
 	if err != nil {
-		return fmt.Errorf("failed to get credentials: %w", err)
+		return nil, err
 	}
 
-	s.imapClient, err = imap.NewClient(s.account)
+	// Reuse the session from an earlier visit to this account, unless its
+	// connection died.
+	if session, ok := s.sessions.get(account.Name); ok && !session.broken {
+		return session, nil
+	}
+	s.sessions.remove(account.Name)
+
+	credential, err := credentialFor(account)
 	if err != nil {
-		return fmt.Errorf("failed to create IMAP client: %w", err)
-	}
-	if err := s.imapClient.Connect(password); err != nil {
-		return fmt.Errorf("failed to connect: %w", err)
+		return nil, fmt.Errorf("failed to get credentials: %w", err)
 	}
 
-	s.executor = actions.NewExecutor(s.imapClient, &s.cfg.Fallback)
-	s.executor.SetSMTPCredentials(password)
+	client, err := imap.NewClient(account)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create IMAP client: %w", err)
+	}
+	if err := client.Connect(credential); err != nil {
+		return nil, fmt.Errorf("failed to connect: %w", err)
+	}
 
+	session := &accountSession{
+		account:    account,
+		imapClient: client,
+		credential: credential,
+	}
+	s.sessions.put(account.Name, session)
+
+	return session, nil
+}
+
+// activeSession returns the session used when no account is specified.
+func (s *Server) activeSession() *accountSession {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if session, ok := s.sessions.get(s.defaultAccountName()); ok {
+		return session
+	}
 	return nil
+}
+
+// defaultAccountName returns the name of the first configured account.
+func (s *Server) defaultAccountName() string {
+	if s.cfg == nil || len(s.cfg.Mail) == 0 {
+		return ""
+	}
+	return s.cfg.Mail[0].Name
+}
+
+// resolveFolder returns the folder to use. When no folder is given, the
+// folder configured for the account is used.
+func (s *Server) resolveFolder(account *config.MailAccount, folder string) string {
+	if folder != "" {
+		return folder
+	}
+	if account != nil && account.Folder != "" {
+		return account.Folder
+	}
+	return "INBOX"
 }
 
 // --- Tool Definitions ---
@@ -173,23 +260,21 @@ type ListEmailsParams struct {
 }
 
 func (s *Server) toolListEmails(ctx context.Context, req *mcp.CallToolRequest, args ListEmailsParams) (*mcp.CallToolResult, any, error) {
-	if err := s.ensureConnection(); err != nil {
+	session, err := s.ensureConnection()
+	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
 		}, nil, nil
 	}
 
-	folder := args.Folder
-	if folder == "" {
-		folder = "INBOX"
-	}
+	folder := s.resolveFolder(session.account, args.Folder)
 	limit := args.Limit
 	if limit == 0 {
 		limit = 10
 	}
 
-	emails, err := s.imapClient.ListEmails(folder, uint32(limit))
+	emails, err := session.imapClient.ListEmails(folder, uint32(limit))
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
@@ -213,7 +298,8 @@ type ReadEmailParams struct {
 }
 
 func (s *Server) toolReadEmail(ctx context.Context, req *mcp.CallToolRequest, args ReadEmailParams) (*mcp.CallToolResult, any, error) {
-	if err := s.ensureConnection(); err != nil {
+	session, err := s.ensureConnection()
+	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
@@ -227,12 +313,9 @@ func (s *Server) toolReadEmail(ctx context.Context, req *mcp.CallToolRequest, ar
 		}, nil, nil
 	}
 
-	folder := args.Folder
-	if folder == "" {
-		folder = "INBOX"
-	}
+	folder := s.resolveFolder(session.account, args.Folder)
 
-	email, err := s.imapClient.ReadEmail(folder, uint32(args.UID))
+	email, err := session.imapClient.ReadEmail(folder, uint32(args.UID))
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
@@ -254,7 +337,8 @@ type ArchiveEmailParams struct {
 }
 
 func (s *Server) toolArchiveEmail(ctx context.Context, req *mcp.CallToolRequest, args ArchiveEmailParams) (*mcp.CallToolResult, any, error) {
-	if err := s.ensureConnection(); err != nil {
+	session, err := s.ensureConnection()
+	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
@@ -268,12 +352,9 @@ func (s *Server) toolArchiveEmail(ctx context.Context, req *mcp.CallToolRequest,
 		}, nil, nil
 	}
 
-	folder := args.Folder
-	if folder == "" {
-		folder = "INBOX"
-	}
+	folder := s.resolveFolder(session.account, args.Folder)
 
-	if err := s.imapClient.ArchiveEmail(folder, uint32(args.UID)); err != nil {
+	if err := session.imapClient.ArchiveEmail(folder, uint32(args.UID)); err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
@@ -292,7 +373,8 @@ type ReplyToEmailParams struct {
 }
 
 func (s *Server) toolReplyToEmail(ctx context.Context, req *mcp.CallToolRequest, args ReplyToEmailParams) (*mcp.CallToolResult, any, error) {
-	if err := s.ensureConnection(); err != nil {
+	session, err := s.ensureConnection()
+	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
@@ -306,12 +388,9 @@ func (s *Server) toolReplyToEmail(ctx context.Context, req *mcp.CallToolRequest,
 		}, nil, nil
 	}
 
-	folder := args.Folder
-	if folder == "" {
-		folder = "INBOX"
-	}
+	folder := s.resolveFolder(session.account, args.Folder)
 
-	email, err := s.imapClient.ReadEmail(folder, uint32(args.UID))
+	email, err := session.imapClient.ReadEmail(folder, uint32(args.UID))
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
@@ -325,7 +404,7 @@ func (s *Server) toolReplyToEmail(ctx context.Context, req *mcp.CallToolRequest,
 		ActionArgs: map[string]interface{}{"reply": args.Message},
 	}
 
-	if err := s.executor.Execute(email, ruleResp); err != nil {
+	if err := session.executor.Execute(email, ruleResp); err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
@@ -345,7 +424,8 @@ type ForwardEmailParams struct {
 }
 
 func (s *Server) toolForwardEmail(ctx context.Context, req *mcp.CallToolRequest, args ForwardEmailParams) (*mcp.CallToolResult, any, error) {
-	if err := s.ensureConnection(); err != nil {
+	session, err := s.ensureConnection()
+	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
@@ -365,12 +445,9 @@ func (s *Server) toolForwardEmail(ctx context.Context, req *mcp.CallToolRequest,
 		}, nil, nil
 	}
 
-	folder := args.Folder
-	if folder == "" {
-		folder = "INBOX"
-	}
+	folder := s.resolveFolder(session.account, args.Folder)
 
-	email, err := s.imapClient.ReadEmail(folder, uint32(args.UID))
+	email, err := session.imapClient.ReadEmail(folder, uint32(args.UID))
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
@@ -389,7 +466,7 @@ func (s *Server) toolForwardEmail(ctx context.Context, req *mcp.CallToolRequest,
 		ActionArgs: map[string]interface{}{"to": args.To, "reply": note},
 	}
 
-	if err := s.executor.Execute(email, ruleResp); err != nil {
+	if err := session.executor.Execute(email, ruleResp); err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
@@ -408,7 +485,8 @@ type MoveEmailParams struct {
 }
 
 func (s *Server) toolMoveEmail(ctx context.Context, req *mcp.CallToolRequest, args MoveEmailParams) (*mcp.CallToolResult, any, error) {
-	if err := s.ensureConnection(); err != nil {
+	session, err := s.ensureConnection()
+	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
@@ -428,12 +506,9 @@ func (s *Server) toolMoveEmail(ctx context.Context, req *mcp.CallToolRequest, ar
 		}, nil, nil
 	}
 
-	folder := args.Folder
-	if folder == "" {
-		folder = "INBOX"
-	}
+	folder := s.resolveFolder(session.account, args.Folder)
 
-	if err := s.imapClient.MoveEmail(folder, args.Destination, uint32(args.UID)); err != nil {
+	if err := session.imapClient.MoveEmail(folder, args.Destination, uint32(args.UID)); err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
@@ -451,23 +526,21 @@ type ProcessEmailsParams struct {
 }
 
 func (s *Server) toolProcessEmailsWithAI(ctx context.Context, req *mcp.CallToolRequest, args ProcessEmailsParams) (*mcp.CallToolResult, any, error) {
-	if err := s.ensureConnection(); err != nil {
+	session, err := s.ensureConnection()
+	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
 			IsError: true,
 		}, nil, nil
 	}
 
-	folder := args.Folder
-	if folder == "" {
-		folder = "INBOX"
-	}
+	folder := s.resolveFolder(session.account, args.Folder)
 	limit := args.Limit
 	if limit == 0 {
 		limit = 10
 	}
 
-	emails, err := s.imapClient.ListEmails(folder, uint32(limit))
+	emails, err := session.imapClient.ListEmails(folder, uint32(limit))
 	if err != nil {
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.TextContent{Text: "Error: " + err.Error()}},
@@ -477,7 +550,7 @@ func (s *Server) toolProcessEmailsWithAI(ctx context.Context, req *mcp.CallToolR
 
 	var results string
 	for _, email := range emails {
-		fullEmail, err := s.imapClient.ReadEmail(folder, email.UID)
+		fullEmail, err := session.imapClient.ReadEmail(folder, email.UID)
 		if err != nil {
 			results += fmt.Sprintf("❌ #%d: Error reading - %v\n", email.UID, err)
 			continue
@@ -495,7 +568,7 @@ func (s *Server) toolProcessEmailsWithAI(ctx context.Context, req *mcp.CallToolR
 			ActionArgs: aiResp.ActionArgs,
 		}
 
-		if err := s.executor.Execute(fullEmail, ruleResp); err != nil {
+		if err := session.executor.Execute(fullEmail, ruleResp); err != nil {
 			results += fmt.Sprintf("⚠️ #%d (%s): %s - %v\n", email.UID, email.Subject, aiResp.Action, err)
 		} else {
 			results += fmt.Sprintf("✅ #%d (%s): %s\n", email.UID, email.Subject, aiResp.Action)
