@@ -1,6 +1,7 @@
 package actions
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -31,21 +32,52 @@ func (e *Executor) SetSMTPCredentials(pass string) {
 
 // Execute runs all recommended actions for an email.
 // Supports multiple actions (e.g., "reply AND archive") by scanning the
-// motivation text in addition to the primary action.
+// motivation text in addition to the primary action. All actions are attempted
+// even if one of them fails.
 func (e *Executor) Execute(email *rules.EmailContext, response *rules.Response) error {
 	actions := e.collectActions(response)
+
+	var errs []error
 	for _, action := range actions {
 		if err := e.executeSingleAction(email, response, action); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("%s: %w", action, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// ProposedActions returns the actions that Execute would run for a response.
+// Used by the UI to show the user what is about to happen.
+func (e *Executor) ProposedActions(response *rules.Response) []string {
+	return e.collectActions(response)
+}
+
+// ExecuteActions runs exactly the given actions for an email, without looking
+// for additional actions in the motivation text. Used when the user has
+// approved a specific set of actions.
+func (e *Executor) ExecuteActions(email *rules.EmailContext, response *rules.Response, actions []string) error {
+	var errs []error
+	for _, action := range actions {
+		if err := e.executeSingleAction(email, response, action); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", action, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // collectActions returns all actions found in the AI response, including
-// implicit actions mentioned in the motivation text.
+// multi-action answers ("ÅTGÄRD: reply, archive") and implicit actions
+// mentioned in the motivation text.
 func (e *Executor) collectActions(response *rules.Response) []string {
 	actions := []string{response.Action}
+
+	// Explicit multi-action list, e.g. ["reply", "archive"].
+	for _, action := range actionList(response) {
+		if action != "" && !sliceContains(actions, action) {
+			actions = append(actions, action)
+		}
+	}
+
 	motivation := strings.ToLower(response.Motivation)
 
 	for action, present := range e.collectImplicitActions(motivation) {
@@ -55,6 +87,27 @@ func (e *Executor) collectActions(response *rules.Response) []string {
 	}
 
 	return actions
+}
+
+// actionList reads the "actions" argument, which holds every action when the
+// AI answered with more than one.
+func actionList(response *rules.Response) []string {
+	if response.ActionArgs == nil {
+		return nil
+	}
+	switch v := response.ActionArgs["actions"].(type) {
+	case []string:
+		return v
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func sliceContains(slice []string, item string) bool {
@@ -97,7 +150,11 @@ func (e *Executor) executeSingleAction(email *rules.EmailContext, response *rule
 		if to == "" {
 			return fmt.Errorf("forward action requires a 'to' address (use TILL: or TO: in response)")
 		}
-		return e.forward(email, to, getActionArg(response, "reply"))
+		note := getActionArg(response, "reply")
+		if note == "" {
+			note = quotedFromMotivation(response.Motivation)
+		}
+		return e.forward(email, to, note)
 
 	case "reply":
 		return e.reply(email, response)
@@ -163,41 +220,58 @@ func (e *Executor) reply(email *rules.EmailContext, response *rules.Response) er
 func (e *Executor) extractReplyText(response *rules.Response) string {
 	// 1. Explicit action arg
 	if text := getActionArg(response, "reply"); text != "" {
-		return text
+		return strings.TrimSpace(stripQuotes(text))
 	}
 
 	// 2. "Svara:" / "Reply:" prefix in motivation
 	motivation := response.Motivation
 	for _, prefix := range []string{"Svara:", "Reply:", "SVARA:", "REPLY:"} {
 		if idx := strings.Index(strings.ToLower(motivation), strings.ToLower(prefix)); idx >= 0 {
-			return strings.TrimSpace(motivation[idx+len(prefix):])
+			text := strings.TrimSpace(motivation[idx+len(prefix):])
+			text = strings.TrimSpace(strings.Split(text, "\n")[0])
+			if text = stripQuotes(text); text != "" {
+				return text
+			}
 		}
 	}
 
-	// 3. Quoted text in motivation (most reliable)
+	// 3. Quoted text in motivation — only if it looks like a sentence. A single
+	// quoted keyword (e.g. "viktigt") is not a reply.
 	if idx := strings.Index(motivation, "\""); idx >= 0 {
 		if end := strings.Index(motivation[idx+1:], "\""); end > 0 {
-			return motivation[idx+1 : idx+1+end]
+			quoted := motivation[idx+1 : idx+1+end]
+			if len(strings.Fields(quoted)) >= 2 {
+				return strings.TrimSpace(quoted)
+			}
 		}
 	}
 
-	// 4. If motivation contains action verbs after the reply, strip them
-	// e.g. "Tack för ditt mail!" och arkivera mailet
-	stripPatterns := []string{
-		" och arkivera",
-		" och flytta",
-		" och vidarebefordra",
-		" och move",
-		" och archive",
-		" och forward",
-	}
-	for _, pattern := range stripPatterns {
-		if idx := strings.Index(motivation, pattern); idx > 0 {
-			return strings.TrimSpace(motivation[:idx])
+	// 4. Nothing usable found - better to report an error than to send the
+	// motivation text as the mail body.
+	return ""
+}
+
+// quotedFromMotivation returns a quoted sentence from the motivation, e.g. the
+// note text that a forward should carry when the AI did not use the SVAR field.
+func quotedFromMotivation(motivation string) string {
+	if idx := strings.Index(motivation, "\""); idx >= 0 {
+		if end := strings.Index(motivation[idx+1:], "\""); end > 0 {
+			quoted := strings.TrimSpace(motivation[idx+1 : idx+1+end])
+			if len(strings.Fields(quoted)) >= 2 {
+				return quoted
+			}
 		}
 	}
+	return ""
+}
 
-	return motivation
+// stripQuotes removes a single pair of surrounding double quotes.
+func stripQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && strings.HasPrefix(s, "\"") && strings.HasSuffix(s, "\"") {
+		return strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
 }
 
 // --- Forward ---
